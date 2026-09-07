@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Intelligent Document Processing - EC2 Stack (Docker from ECR)
+
+Parameters:
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair
+
+  DocumentInputBucketArn:
+    Type: String
+    Default: ""
+
+  DocumentOutputBucketName:
+    Type: String
+    Default: ""
+
+  ECRRepositoryUri:
+    Type: String
+    Default: ""
+
+  BedrockModelId:
+    Type: String
+    Default: ""
+
+  Environment:
+    Type: String
+    Default: sandbox-prod
+
+  OperatingSystem:
+    Type: String
+    Default: AmazonLinux
+    AllowedValues:
+      - AmazonLinux
+      - Ubuntu
+    Description: Select OS for EC2 instance
+
+Mappings:
+  AmiMap:
+    AmazonLinux:
+      AMI: ami-0f3caa1cf4417e51b
+    Ubuntu:
+      AMI: ami-0b6c6ebed2801a5cb
+
+Resources:
+
+############################################
+# VPC
+############################################
+
+  EC2Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: EC2-IDP-VPC
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+############################################
+# Internet Gateway
+############################################
+
+  EC2InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+  EC2AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref EC2Vpc
+      InternetGatewayId: !Ref EC2InternetGateway
+
+############################################
+# Subnets
+############################################
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref EC2Vpc
+      CidrBlock: 10.20.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref EC2Vpc
+      CidrBlock: 10.20.2.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+############################################
+# Route Table
+############################################
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref EC2Vpc
+      Tags:
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: EC2AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref EC2InternetGateway
+
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+############################################
+# Security Group
+############################################
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access
+      VpcId: !Ref EC2Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+############################################
+# IAM ROLE
+############################################
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AImatic-EC2-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECRPullPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: "*"
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource: "*"
+        - PolicyName: TextractPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - textract:AnalyzeDocument
+                  - textract:DetectDocumentText
+                  - textract:StartDocumentAnalysis
+                  - textract:GetDocumentAnalysis
+                Resource: "*"
+        - PolicyName: BedrockPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+############################################
+# Instance Profile
+############################################
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+############################################
+# EC2 Instance
+############################################
+
+  IDPEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet1
+      KeyName: !Ref KeyPairName
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      ImageId: !FindInMap [AmiMap, !Ref OperatingSystem, AMI]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/user-data.log 2>&1
+
+          if [ "${OperatingSystem}" == "Ubuntu" ]; then
+            apt update -y
+            apt install -y docker.io
+          else
+            dnf update -y
+            dnf install -y docker
+          fi
+
+          systemctl enable docker
+          systemctl start docker
+
+          usermod -aG docker ec2-user
+
+          docker --version
+      Tags:
+        - Key: Name
+          Value: AIMatic
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+############################################
+# Elastic IP
+############################################
+
+  EC2ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Project
+          Value: AIMatic
+        - Key: Environment
+          Value: !Ref Environment
+
+  EC2ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref IDPEC2Instance
+      EIP: !Ref EC2ElasticIP
+
+############################################
+# Outputs
+############################################
+
+Outputs:
+
+  EC2InstanceId:
+    Description: EC2 Instance
+    Value: !Ref IDPEC2Instance
+
+  EC2PublicIP:
+    Description: Public IP
+    Value: !GetAtt IDPEC2Instance.PublicIp
+
+  EC2ElasticIPAddress:
+    Description: Elastic IP
+    Value: !Ref EC2ElasticIP

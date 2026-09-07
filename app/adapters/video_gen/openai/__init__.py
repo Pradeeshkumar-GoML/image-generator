@@ -1,0 +1,1 @@
+"""OpenAI video generation adapter."""
